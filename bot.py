@@ -4,6 +4,18 @@ from collections import defaultdict
 import time
 import traceback
 
+# --- สร้าง Web Server เพื่อหลอก Render ---
+app = Flask('')
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+threading.Thread(target=run_web).start()
+# ----------------------------------------
+
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
