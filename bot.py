@@ -90,4 +90,4 @@ async def on_voice_state_update(member, before, after):
         print(traceback.format_exc())
 
 # เปลี่ยน Token ใหม่หลังจาก Reset ใน Developer Portal ที่นี่
-bot.run("MTU0ODMxNzM4MTY3ODQ3MzIxNw.GThA5A.y_Gmx24s8ZwXEh9x_oG1oH65OdkZ-z3EGQCz_U")
+bot.run("MTU0ODMxNzM4MTY3ODQ3MzIxNw.GEIedw.DxXHkBg5Jma_BEsdZX8MBnW6hh4XYC0fxVjCL8")
