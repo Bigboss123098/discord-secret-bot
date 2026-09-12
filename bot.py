@@ -1,21 +1,27 @@
+import os
+import time
+import threading
+import traceback
+from collections import defaultdict
+from flask import Flask
 import discord
 from discord.ext import commands
-from collections import defaultdict
-import time
-import traceback
 
-# --- สร้าง Web Server เพื่อหลอก Render ---
+# --- Web Server สำหรับหลอก Render ให้รันได้ 24/7 ---
 app = Flask('')
+
 @app.route('/')
 def home():
-    return "Bot is alive!"
+    return "Bot is online 24/7!"
 
 def run_web():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-threading.Thread(target=run_web).start()
-# ----------------------------------------
+threading.Thread(target=run_web, daemon=True).start()
+# --------------------------------------------------
 
+# ตั้งค่า Intents
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
@@ -23,7 +29,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ID ห้องของคุณ
+# ID ห้อง Discord ของคุณ
 TARGET_CHANNEL_1_ID = 1298656451962732620  # ID ห้อง A
 TARGET_CHANNEL_2_ID = 1310982353622925393  # ID ห้อง B
 SECRET_CHANNEL_ID = 1548318934606942299    # ID ห้องลับ
@@ -32,12 +38,12 @@ user_switch_history = defaultdict(lambda: {"last_channel": None, "count": 0, "la
 
 @bot.event
 async def on_ready():
-    print(f'=== บอท {bot.user.name} ออนไลน์และพร้อมใช้งานแล้ว! ===')
+    print(f'=== บอท {bot.user.name} ออนไลน์บน Render พร้อมใช้งานแล้ว! ===')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     try:
-        # 1. เช็กกรณีออกจากห้องลับ ยึดสิทธิ์คืน
+        # 1. ออกจากห้องลับ ให้ดึงสิทธิ์คืน
         if before.channel and before.channel.id == SECRET_CHANNEL_ID and (after.channel is None or after.channel.id != SECRET_CHANNEL_ID):
             secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
             if secret_channel:
@@ -71,7 +77,7 @@ async def on_voice_state_update(member, before, after):
             user_data["last_channel"] = current_channel_id
             user_data["last_time"] = current_time
 
-            # สลับครบ 5 ครั้ง
+            # สลับครบ 5 ครั้ง -> ย้ายไปห้องลับ
             if user_data["count"] >= 5:
                 print(f"[ACTION] ครบ 5 ครั้ง! กำลังพา {member.name} ส่งห้องลับ...")
                 secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
@@ -89,5 +95,6 @@ async def on_voice_state_update(member, before, after):
         print(f"\n❌ เกิด ERROR ในการทำงาน:")
         print(traceback.format_exc())
 
-# เปลี่ยน Token ใหม่หลังจาก Reset ใน Developer Portal ที่นี่
-bot.run(os.environ.get("BOT_TOKEN"))
+# ดึงค่า Token จาก Environment Variable ของ Render (หรือวาง Token ตรงๆ ถ้าไม่ได้ตั้งค่า Environment)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+bot.run(BOT_TOKEN)
