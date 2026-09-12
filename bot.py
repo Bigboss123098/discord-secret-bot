@@ -30,9 +30,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ID ห้อง Discord ของคุณ
-TARGET_CHANNEL_1_ID = 1298656451962732620  # ID ห้อง A
-TARGET_CHANNEL_2_ID = 1310982353622925393  # ID ห้อง B
-SECRET_CHANNEL_ID = 1548318934606942299    # ID ห้องลับ
+TARGET_CHANNEL_1_ID = 1189901220471636018  # ID ห้อง A
+TARGET_CHANNEL_2_ID = 1196415294483202098  # ID ห้อง B
+SECRET_CHANNEL_ID = 1548313870614138940    # ID ห้องลับ
 
 user_switch_history = defaultdict(lambda: {"last_channel": None, "count": 0, "last_time": 0})
 
