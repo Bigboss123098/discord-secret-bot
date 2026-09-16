@@ -38,9 +38,9 @@ SECRET_CHANNEL_ID = 1548313870614138940    # ID ห้องลับ
 VALID_CHANNELS = {TARGET_CHANNEL_1_ID, TARGET_CHANNEL_2_ID}
 
 SWITCH_THRESHOLD = 5      # ต้องสลับกี่ครั้งถึงจะวาร์ป
-SWITCH_TIMEOUT = 10       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
+SWITCH_TIMEOUT = 20       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
 
-DEBOUNCE_SECONDS = 10      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
+DEBOUNCE_SECONDS = 20      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
 RATE_LIMIT_RETRY_BUFFER = 2  # ติดลิมิตแล้วรอเพิ่มกี่วิจาก retry_after ที่ Discord บอก
 
 # ชื่อห้อง (แบบไม่รวมอีโมจิสถานะ)
