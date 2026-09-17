@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import asyncio
 import threading
 import traceback
@@ -38,10 +39,34 @@ SECRET_CHANNEL_ID = 1548313870614138940    # ID ห้องลับ
 VALID_CHANNELS = {TARGET_CHANNEL_1_ID, TARGET_CHANNEL_2_ID}
 
 SWITCH_THRESHOLD = 5      # ต้องสลับกี่ครั้งถึงจะวาร์ป
-SWITCH_TIMEOUT = 20       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
+SWITCH_TIMEOUT = 10       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
 
-DEBOUNCE_SECONDS = 20      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
-RATE_LIMIT_RETRY_BUFFER = 2  # ติดลิมิตแล้วรอเพิ่มกี่วิจาก retry_after ที่ Discord บอก
+DEBOUNCE_SECONDS = 4      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
+RATE_LIMIT_RETRY_BUFFER = 2   # ติดลิมิตแล้วรอเพิ่มกี่วิจาก retry_after ที่ Discord บอก
+RECONCILE_INTERVAL_SECONDS = 90  # ทุกกี่วิ ให้ไล่เช็คสถานะทุกห้องแบบเงียบๆ (ตาข่ายนิรภัย)
+
+# ----------------------------------------------------
+# ตั้งค่าเสียงต้อนรับ (ตอนคนถูกวาร์ปเข้า Backroom)
+# ----------------------------------------------------
+WELCOME_SOUND_ENABLED = True
+WELCOME_SOUND_PATHS = ["sounds/sound1.MP3", "sounds/sound2.MP3"]  # แก้ path ให้ตรงกับไฟล์จริง
+WELCOME_SOUND_CHANCE = 1 / 3       # โอกาสที่จะเล่นเสียงต้อนรับตอนมีคนวาร์ปเข้ามา
+WELCOME_SOUND_COOLDOWN = 10 * 60   # cooldown วิ หลังเล่นแล้ว ก่อนจะเล่นให้คนถัดไปได้อีก
+
+# ----------------------------------------------------
+# ตั้งค่าระบบ "บอทหลอน" สุ่มเข้า Backroom เอง
+# ----------------------------------------------------
+HAUNT_SOUND_ENABLED = True
+HAUNT_SOUND_PATHS = ["sounds/1.mp3", "sounds/2.mp3", "sounds/3.mp3", "sounds/4.mp3", "sounds/5.mp3"]
+HAUNT_MIN_INTERVAL = 10 * 60   # สุ่มรอสั้นสุดกี่วิ ก่อนจะลองเข้ารอบถัดไป
+HAUNT_MAX_INTERVAL = 50 * 60   # สุ่มรอนานสุดกี่วิ
+HAUNT_COOLDOWN = 30 * 60       # หลังเข้าไปเล่นสำเร็จแล้ว ต้องรออย่างน้อยกี่วิถึงจะลองรอบใหม่
+
+# ระดับเสียงโดยรวม (ใช้ร่วมกันทั้งสองระบบ) — ปรับให้เบาลงได้ตามต้องการ
+# หมายเหตุ: เสียง "ติ้ง" ตอนบอทเข้า/ออกห้องเสียงเป็นเสียงแจ้งเตือนของ Discord
+# client แต่ละคนเอง ไม่ใช่เสียงที่บอทเล่น บอทไม่มีทางปิดเสียงนี้ได้เลย
+# ถ้าอยากปิดต้องให้สมาชิกไปปิดเองที่ User Settings > Notifications ฝั่งเขา
+SOUND_VOLUME = 0.4  # 0.0 - 1.0+ (1.0 = ระดับเสียงต้นฉบับ)
 
 # ชื่อห้อง (แบบไม่รวมอีโมจิสถานะ)
 CHANNEL_NAMES = {
@@ -55,6 +80,134 @@ user_switch_history = defaultdict(lambda: {"last_channel": None, "count": 0, "la
 
 # เก็บ debounce task ที่กำลังรอต่อห้อง (channel_id -> asyncio.Task)
 _pending_status_tasks = {}
+
+# กันบอทเล่นเสียงซ้อนกันหลายห้อง/หลายคนพร้อมกัน — ใช้ 1 lock ต่อกิลด์ ร่วมกันทั้ง
+# ระบบเสียงต้อนรับและระบบบอทหลอน เพราะบอทมี voice connection ได้แค่ 1 อันต่อกิลด์
+# (เล่นสองอย่างพร้อมกันในกิลด์เดียวไม่ได้อยู่แล้วในทางเทคนิค)
+_voice_lock = defaultdict(asyncio.Lock)
+
+# เวลาล่าสุดที่เล่นเสียงต้อนรับสำเร็จ ต่อกิลด์ (guild_id -> timestamp) สำหรับ cooldown
+_welcome_sound_last_played = defaultdict(lambda: 0.0)
+
+
+async def play_sound_in_channel(channel, sound_path, label="เสียง"):
+    """ฟังก์ชันกลาง: ต่อ voice เข้าห้อง เล่นไฟล์เสียง แล้วออกจากห้องเองเสมอ
+    ปลอดภัยจาก error ระหว่างเล่น ใช้ร่วมกันทั้งระบบต้อนรับและระบบหลอน
+    คืนค่า True ถ้าเล่นสำเร็จ (ต่อ voice ได้และเล่นจบ), False ถ้าไม่สำเร็จ/ถูกข้าม"""
+    guild = channel.guild
+    lock = _voice_lock[guild.id]
+
+    if lock.locked():
+        print(f"[VOICE] ข้าม{label} เพราะบอทกำลังเล่นเสียงอื่นอยู่ในกิลด์นี้")
+        return False
+
+    async with lock:
+        if not os.path.isfile(sound_path):
+            print(f"[ERROR] ไม่พบไฟล์เสียง: {sound_path}")
+            return False
+
+        voice_client = None
+        try:
+            existing = guild.voice_client
+            if existing:
+                await existing.move_to(channel)
+                voice_client = existing
+            else:
+                voice_client = await channel.connect(timeout=15, reconnect=False)
+
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(sound_path),
+                volume=SOUND_VOLUME,
+            )
+
+            finished = asyncio.Event()
+
+            def _on_done(error):
+                if error:
+                    print(f"[ERROR] เล่น{label}ไม่สำเร็จ: {error}")
+                # ตั้ง event จาก event loop หลัก เพราะ callback นี้ถูกเรียกจาก thread อื่น
+                bot.loop.call_soon_threadsafe(finished.set)
+
+            voice_client.play(source, after=_on_done)
+
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                print(f"[WARN] {label}เล่นนานเกินคาด บังคับหยุด")
+                voice_client.stop()
+
+            return True
+
+        except discord.errors.ClientException as e:
+            print(f"[ERROR] ต่อ voice ไม่สำเร็จ (อาจต่ออยู่แล้วหรือสิทธิ์ไม่พอ): {e}")
+            return False
+        except asyncio.TimeoutError:
+            print(f"[ERROR] ต่อ voice ห้อง {channel.id} timeout")
+            return False
+        except Exception:
+            print(f"\n❌ เกิด ERROR ใน play_sound_in_channel ({label}):")
+            print(traceback.format_exc())
+            return False
+        finally:
+            # ออกจากห้องเสมอไม่ว่าจะเกิดอะไรขึ้น กันบอทค้างอยู่ใน voice
+            if voice_client and voice_client.is_connected():
+                try:
+                    await voice_client.disconnect(force=True)
+                except Exception:
+                    pass
+
+
+async def play_backroom_welcome_sound(member, secret_channel):
+    """ระบบเสียงต้อนรับ: สุ่ม 1/3 ว่าจะเล่นไหม มี cooldown แยกของตัวเอง
+    ไม่เกี่ยวข้องกับระบบบอทหลอน (คนละชุดไฟล์ คนละ cooldown)"""
+    if not WELCOME_SOUND_ENABLED:
+        return
+
+    guild_id = secret_channel.guild.id
+    now = time.time()
+
+    if now - _welcome_sound_last_played[guild_id] < WELCOME_SOUND_COOLDOWN:
+        print(f"[VOICE] ข้ามเสียงต้อนรับให้ {member.name} เพราะยังติด cooldown อยู่")
+        return
+
+    if random.random() > WELCOME_SOUND_CHANCE:
+        return  # สุ่มไม่โดน รอบนี้ไม่เล่น
+
+    sound_path = random.choice(WELCOME_SOUND_PATHS)
+    success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงต้อนรับ")
+    if success:
+        _welcome_sound_last_played[guild_id] = time.time()
+
+
+async def backroom_haunt_loop(guild):
+    """ระบบบอทหลอน: วนสุ่มเวลารอ 10-50 นาที แล้วลองเข้า Backroom เอง
+    เข้าได้ก็ต่อเมื่อมีคน (ไม่ใช่บอท) อยู่ในห้องนั้นจริงๆ ถ้าห้องว่างข้ามรอบไปเลย
+    เข้าสำเร็จแล้วมี cooldown 30 นาทีก่อนจะลองรอบใหม่ได้"""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        wait_time = random.uniform(HAUNT_MIN_INTERVAL, HAUNT_MAX_INTERVAL)
+        print(f"[HAUNT] รอบถัดไปในอีก {wait_time / 60:.1f} นาที")
+        await asyncio.sleep(wait_time)
+
+        try:
+            secret_channel = guild.get_channel(SECRET_CHANNEL_ID)
+            if not secret_channel:
+                continue
+
+            human_members = [m for m in secret_channel.members if not m.bot]
+            if not human_members:
+                print("[HAUNT] ห้อง Backroom ว่าง ข้ามรอบนี้")
+                continue
+
+            sound_path = random.choice(HAUNT_SOUND_PATHS)
+            success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงหลอน")
+            if success:
+                print(f"[HAUNT] เข้าไปหลอนสำเร็จ พักอย่างน้อย {HAUNT_COOLDOWN / 60:.0f} นาที")
+                await asyncio.sleep(HAUNT_COOLDOWN)
+
+        except Exception:
+            print(f"\n❌ เกิด ERROR ใน backroom_haunt_loop:")
+            print(traceback.format_exc())
 
 
 async def _apply_channel_status(channel):
@@ -80,8 +233,15 @@ async def _apply_channel_status(channel):
     except discord.errors.Forbidden:
         print(f"[ERROR] บอทไม่มีสิทธิ์ Manage Channels สำหรับห้อง {channel.id}")
     except discord.errors.HTTPException as e:
-        retry_after = getattr(e, "retry_after", None)
-        if e.status == 429 and retry_after:
+        if e.status == 429:
+            # ดึง retry_after ให้ชัวร์ที่สุดเท่าที่ทำได้ (บางกรณี discord.py ไม่เซ็ต
+            # e.retry_after ให้ตรงๆ) ถ้าหาไม่ได้เลยก็ fallback เป็นค่า default
+            retry_after = getattr(e, "retry_after", None)
+            if not retry_after:
+                try:
+                    retry_after = float(e.response.headers.get("Retry-After", 5))
+                except Exception:
+                    retry_after = 5.0
             wait_time = retry_after + RATE_LIMIT_RETRY_BUFFER
             print(f"[WARN] ติด Rate Limit ห้อง {channel.id} จะลองใหม่ใน {wait_time:.1f} วิ")
             await asyncio.sleep(wait_time)
@@ -118,6 +278,30 @@ def schedule_channel_status_update(channel):
     _pending_status_tasks[channel.id] = asyncio.create_task(_debounced_status_update(channel))
 
 
+async def channel_status_reconciler():
+    """ตาข่ายนิรภัย: วนเช็คทุกห้องใน CHANNEL_NAMES เป็นระยะๆ ไม่พึ่ง event เลย
+    กันกรณีห้องค้างอิโมจิผิด (เช่น ติด rate limit ตอนบอท restart พอดี,
+    หรือ retry ครั้งก่อนพลาดไปด้วยเหตุผลอื่น) ให้กลับมาตรงกับความจริงเองได้เสมอ
+    ไม่ยิงพร้อมกันทีเดียวทุกห้อง แต่เว้นจังหวะห่างกันเล็กน้อยเพื่อลดความเสี่ยง
+    ชนกับ Rate Limit ที่อาจเกิดจาก event สดๆ ที่ debounce กำลังจัดการอยู่พอดี"""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            for channel_id in CHANNEL_NAMES.keys():
+                # ถ้าห้องนี้มี debounce task ของ event สดกำลังทำงานอยู่ ข้ามไปก่อน
+                # ปล่อยให้ event เป็นคนจัดการรอบนี้ ไม่ต้องแย่งกันยิง API
+                pending = _pending_status_tasks.get(channel_id)
+                if pending and not pending.done():
+                    continue
+
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    await _apply_channel_status(channel)
+                await asyncio.sleep(1)  # เว้นจังหวะระหว่างห้อง กันยิงรัวๆ ทีเดียวหลายห้อง
+
+        await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+
+
 def handle_switch_count(member_id, current_channel_id):
     """คำนวณและอัปเดตตัวนับการสลับห้อง คืนค่า True ถ้าถึงเงื่อนไขวาร์ป"""
     current_time = time.time()
@@ -145,8 +329,13 @@ def handle_switch_count(member_id, current_channel_id):
     return False
 
 
+_reconciler_started = False
+_haunt_started = False
+
+
 @bot.event
 async def on_ready():
+    global _reconciler_started, _haunt_started
     print(f'=== บอท {bot.user.name} ออนไลน์พร้อมระบบเปลี่ยนสีสถานะห้อง! ===')
     for guild in bot.guilds:
         for channel_id in CHANNEL_NAMES.keys():
@@ -154,6 +343,17 @@ async def on_ready():
             if channel:
                 # ตอนเปิดบอทไม่ต้อง debounce เช็คสถานะจริงได้เลย
                 await _apply_channel_status(channel)
+
+    # on_ready อาจถูกเรียกซ้ำได้ถ้า Discord ให้ reconnect ใหม่ กันไม่ให้เปิด
+    # reconciler loop ซ้อนกันหลายตัว
+    if not _reconciler_started:
+        _reconciler_started = True
+        asyncio.create_task(channel_status_reconciler())
+
+    if HAUNT_SOUND_ENABLED and not _haunt_started:
+        _haunt_started = True
+        for guild in bot.guilds:
+            asyncio.create_task(backroom_haunt_loop(guild))
 
 
 @bot.event
@@ -184,6 +384,9 @@ async def on_voice_state_update(member, before, after):
                         await secret_channel.set_permissions(member, connect=True, view_channel=True)
                         await member.move_to(secret_channel)
                         print(f"[SUCCESS] วาร์ป {member.name} ไปยังห้องลับสำเร็จ!")
+                        # เล่นเสียงต้อนรับแบบ background ไม่ block event handler
+                        # (ถ้ารอ await ตรงๆ event ของสมาชิกคนอื่นจะต้องรอจนเสียงเล่นจบ)
+                        asyncio.create_task(play_backroom_welcome_sound(member, secret_channel))
                     except discord.errors.Forbidden:
                         print(f"[ERROR] บอทไม่มีสิทธิ์ move_members หรือจัดการ permission ห้องลับ")
 
