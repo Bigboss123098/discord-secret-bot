@@ -1,20 +1,30 @@
 import os
+import sys
 import time
-import random
 import asyncio
 import threading
 import traceback
-from collections import defaultdict
+import logging
 from flask import Flask
 import discord
 from discord.ext import commands
+
+# ----------------------------------------------------
+# 1. ตั้งค่าระบบ Logging 
+# ----------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- Web Server สำหรับ Render ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is online 24/7!"
+    return "Bot is online and running core systems!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -31,204 +41,95 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ----------------------------------------------------
-# กำหนด ID และชื่อฐานของห้องพูดคุย
+# 2. ตั้งค่า ID และชื่อฐานของห้อง
 # ----------------------------------------------------
-TARGET_CHANNEL_1_ID = 1189901220471636018  # ID ห้อง A
-TARGET_CHANNEL_2_ID = 1196415294483202098  # ID ห้อง B
-SECRET_CHANNEL_ID = 1548313870614138940    # ID ห้องลับ
+TARGET_CHANNEL_1_ID = 1189901220471636018  
+TARGET_CHANNEL_2_ID = 1196415294483202098  
+SECRET_CHANNEL_ID = 1548313870614138940    
 VALID_CHANNELS = {TARGET_CHANNEL_1_ID, TARGET_CHANNEL_2_ID}
 
-SWITCH_THRESHOLD = 5      # ต้องสลับกี่ครั้งถึงจะวาร์ป
-SWITCH_TIMEOUT = 10       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
+# กฎการวาร์ป
+SWITCH_THRESHOLD = 5      
+SWITCH_TIMEOUT = 10       
 
-DEBOUNCE_SECONDS = 20      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง
-RATE_LIMIT_RETRY_BUFFER = 2   # ติดลิมิตแล้วรอเพิ่มกี่วิ
-RECONCILE_INTERVAL_SECONDS = 90  # ทุกกี่วิ ให้ไล่เช็คสถานะทุกห้องแบบเงียบๆ
+# กฎอัปเดตสีสถานะห้อง
+DEBOUNCE_SECONDS = 15             
+RATE_LIMIT_RETRY_BUFFER = 2       
+RECONCILE_INTERVAL_SECONDS = 90   
 
-# ----------------------------------------------------
-# ตั้งค่าระบบ "บอทสุ่มเข้าห้องเล่นเสียง" (Haunt System)
-# ----------------------------------------------------
-HAUNT_SOUND_ENABLED = True
-# รวมเสียงทุกไฟล์เข้าด้วยกันสำหรับสุ่มเล่น
-HAUNT_SOUND_PATHS = [
-    "sounds/sound1.MP3", 
-    "sounds/sound2.MP3", 
-    "sounds/1.mp3", 
-    "sounds/2.mp3", 
-    "sounds/3.mp3", 
-    "sounds/4.mp3", 
-    "sounds/5.mp3"
-]
-HAUNT_CHECK_INTERVAL = 1 * 60   # เช็ครอบใหม่ทุกกี่วิ (5 นาที)
-HAUNT_CHANCE_PER_CHECK = 1    # โอกาสที่จะเข้าไปเล่นจริงในแต่ละรอบเช็ค (0.5 = 50%)
-HAUNT_COOLDOWN = 1        # หลังเข้าไปเล่นสำเร็จแล้ว พักกี่วิก่อนเริ่มเช็ครอบใหม่ (20 นาที)
-
-SOUND_VOLUME = 0.4  # ระดับเสียง 0.0 - 1.0 (0.4 = 40%)
-
-# ชื่อห้อง (แบบไม่รวมอีโมจิสถานะ)
 CHANNEL_NAMES = {
     1344731417233330226: "┊ 𝔾𝔸𝕄𝔼 𝕄𝕆𝔻𝔼 𝕀",
     1189901220471636018: "┊ 𝔾𝔸𝕄𝔼 𝕄𝕆𝔻𝔼 𝕀𝕀",
     1196415294483202098: "┊ 𝔾𝔸𝕄𝔼 𝕄𝕆𝔻𝔼 𝕀𝕀𝕀",
 }
 
-user_switch_history = defaultdict(lambda: {"last_channel": None, "count": 0, "last_time": 0.0})
+user_switch_history = {}
 _pending_status_tasks = {}
-_voice_lock = defaultdict(asyncio.Lock)
 
+# ----------------------------------------------------
+# 3. ฟังก์ชันผู้ช่วย (Helper Functions)
+# ----------------------------------------------------
+async def _safe_remove_permission(channel, member):
+    """ฟังก์ชันช่วยถอนสิทธิ์ผู้ใช้ออกจากห้องลับแบบปลอดภัย"""
+    try:
+        await channel.set_permissions(member, overwrite=None)
+        logger.info(f"[PERM CLEANUP] ถอนสิทธิ์ห้องลับของ {member.name} สำเร็จ")
+    except Exception as e:
+        logger.error(f"[PERM CLEANUP ERROR] ไม่สามารถถอนสิทธิ์ {member.name}: {e}")
 
-async def play_sound_in_channel(channel, sound_path, label="เสียง"):
-    """ฟังก์ชันเล่นเสียงเข้าห้อง แล้วออกจากห้องเอง"""
-    guild = channel.guild
-    lock = _voice_lock[guild.id]
+async def reconcile_secret_channel_permissions(guild):
+    """สแกนและล้าง Permission ค้างในห้องลับตอนบอทเริ่มทำงาน (Startup Reconciliation)"""
+    secret_channel = guild.get_channel(SECRET_CHANNEL_ID)
+    if not secret_channel:
+        return
 
-    if lock.locked():
-        print(f"[VOICE] ข้าม {label} เพราะบอทกำลังเล่นเสียงอื่นอยู่ในกิลด์นี้", flush=True)
-        return False
+    current_members = set(secret_channel.members)
+    
+    for target, overwrite in list(secret_channel.overwrites.items()):
+        if isinstance(target, discord.Member) and not target.bot:
+            # ถ้าผู้ใช้ไม่อยู่ในห้องลับ แต่มี Overwrite ค้างอยู่ -> ลบทิ้ง
+            if target not in current_members:
+                logger.warning(f"[RECONCILE STARTUP] พบสิทธิ์ค้างของ {target.name} (อาจเกิดจาก บอท Crash/Restart) กำลังล้างสิทธิ์...")
+                await _safe_remove_permission(secret_channel, target)
 
-    async with lock:
-        if not os.path.isfile(sound_path):
-            print(f"[ERROR] ไม่พบไฟล์เสียง: {sound_path}", flush=True)
-            return False
-
-        voice_client = None
-        try:
-            # 1. หน่วงเวลาเล็กน้อยให้ Voice State ของ Discord นิ่ง
-            await asyncio.sleep(1.0)
-
-            # 2. ล้าง Voice Client เก่าถ้ามีค้าง
-            if guild.voice_client:
-                try:
-                    await guild.voice_client.disconnect(force=True)
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
-
-            # 3. เชื่อมต่อเข้าห้องเสียง
-            print(f"[VOICE] กำลังเชื่อมต่อเข้าห้อง {channel.name} ({channel.id})...", flush=True)
-            voice_client = await channel.connect(timeout=15, reconnect=True)
-            await asyncio.sleep(0.5)
-
-            if not voice_client.is_connected():
-                print(f"[ERROR] การเชื่อมต่อ voice หลุดก่อนจะได้เล่นเสียง", flush=True)
-                return False
-
-            print(f"[VOICE] ต่อ voice สำเร็จ กำลังเริ่มเล่น {label}: {sound_path}", flush=True)
-
-            # ใช้ FFmpeg Filter ปรับระดับเสียง เพื่อลดภาระ CPU ของเครื่อง Render
-            ffmpeg_options = {
-                'options': f'-vn -filter:a "volume={SOUND_VOLUME}"'
-            }
-            source = discord.FFmpegPCMAudio(sound_path, **ffmpeg_options)
-
-            finished = asyncio.Event()
-
-            def _on_done(error):
-                if error:
-                    print(f"[ERROR] เล่น {label} ไม่สำเร็จ: {error}", flush=True)
-                bot.loop.call_soon_threadsafe(finished.set)
-
-            voice_client.play(source, after=_on_done)
-
-            # 4. รอจนกว่าเสียงจะเล่นจบ
-            try:
-                await asyncio.wait_for(finished.wait(), timeout=60)
-                if voice_client.is_connected():
-                    print(f"[VOICE] เล่น {label} จบแล้ว กำลังออกจากห้อง", flush=True)
-                else:
-                    print(f"[WARN] เสียงเล่นจบแล้ว แต่บอทหลุดจากห้องระหว่างเล่น", flush=True)
-            except asyncio.TimeoutError:
-                print(f"[WARN] {label} เล่นนานเกินคาด บังคับหยุด", flush=True)
-                if voice_client.is_playing():
-                    voice_client.stop()
-
-            return True
-
-        except discord.errors.ClientException as e:
-            print(f"[ERROR] ต่อ voice ไม่สำเร็จ: {e}", flush=True)
-            return False
-        except asyncio.TimeoutError:
-            print(f"[ERROR] ต่อ voice ห้อง {channel.id} timeout", flush=True)
-            return False
-        except Exception:
-            print(f"\n❌ เกิด ERROR ใน play_sound_in_channel ({label}):", flush=True)
-            print(traceback.format_exc(), flush=True)
-            return False
-        finally:
-            # 5. ออกจากห้องเสมอไม่ว่าจะเกิดอะไรขึ้น
-            if voice_client and voice_client.is_connected():
-                try:
-                    await voice_client.disconnect(force=True)
-                except Exception:
-                    pass
-
-
-async def backroom_haunt_loop(guild):
-    """ระบบสุ่มเข้าห้องลับมาเล่นเสียงแบบสุ่ม เมื่อมีคนอยู่ในห้อง"""
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        await asyncio.sleep(HAUNT_CHECK_INTERVAL)
-
-        try:
-            secret_channel = guild.get_channel(SECRET_CHANNEL_ID)
-            if not secret_channel:
-                continue
-
-            human_members = [m for m in secret_channel.members if not m.bot]
-            if not human_members:
-                continue  # ห้องว่าง ข้ามรอบนี้ไป
-
-            if random.random() > HAUNT_CHANCE_PER_CHECK:
-                continue  # สุ่มไม่โดนรอบนี้
-
-            sound_path = random.choice(HAUNT_SOUND_PATHS)
-            success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงสุ่ม")
-            if success:
-                print(f"[HAUNT] เข้าไปเล่นเสียงสำเร็จ พักอย่างน้อย {HAUNT_COOLDOWN / 60:.0f} นาที", flush=True)
-                await asyncio.sleep(HAUNT_COOLDOWN)
-
-        except Exception:
-            print(f"\n❌ เกิด ERROR ใน backroom_haunt_loop:", flush=True)
-            print(traceback.format_exc(), flush=True)
-
-
+# ----------------------------------------------------
+# 4. ฟังก์ชันระบบจัดการสีห้อง
+# ----------------------------------------------------
 async def _apply_channel_status(channel):
-    """อัปเดตชื่อห้องพร้อมสถานะ 🟢 / 🔴"""
+    """เปลี่ยนชื่อห้องพร้อมสถานะ 🟢 / 🔴"""
     if not channel or channel.id not in CHANNEL_NAMES:
         return
 
     base_name = CHANNEL_NAMES[channel.id]
-    human_members = [m for m in channel.members if not m.bot]
-    has_members = len(human_members) > 0
-
+    has_members = any(not m.bot for m in channel.members)
     status_emoji = "🟢" if has_members else "🔴"
     new_name = f"{status_emoji} {base_name}"
 
     if channel.name == new_name:
         return
 
-    try:
-        await channel.edit(name=new_name)
-        print(f"[STATUS] เปลี่ยนชื่อห้อง {channel.id} เป็น: {new_name}", flush=True)
-    except discord.errors.Forbidden:
-        print(f"[ERROR] บอทไม่มีสิทธิ์ Manage Channels สำหรับห้อง {channel.id}", flush=True)
-    except discord.errors.HTTPException as e:
-        if e.status == 429:
-            retry_after = getattr(e, "retry_after", None)
-            if not retry_after:
-                try:
+    for attempt in range(3):
+        try:
+            await channel.edit(name=new_name)
+            logger.info(f"[STATUS] เปลี่ยนชื่อห้องสำเร็จ {channel.id} -> {new_name}")
+            return
+        except discord.errors.Forbidden:
+            logger.error(f"[PERMISSION DENIED] ขาดสิทธิ์ 'Manage Channels' ห้อง {channel.id}")
+            return
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", None)
+                if not retry_after:
                     retry_after = float(e.response.headers.get("Retry-After", 5))
-                except Exception:
-                    retry_after = 5.0
-            wait_time = retry_after + RATE_LIMIT_RETRY_BUFFER
-            print(f"[WARN] ติด Rate Limit ห้อง {channel.id} จะลองใหม่ใน {wait_time:.1f} วิ", flush=True)
-            await asyncio.sleep(wait_time)
-            await _apply_channel_status(channel)
-        else:
-            print(f"[WARN] เปลี่ยนชื่อห้อง {channel.id} ไม่สำเร็จ: {e}", flush=True)
-    except Exception:
-        print(f"\n❌ เกิด ERROR ใน _apply_channel_status:", flush=True)
-        print(traceback.format_exc(), flush=True)
+                wait_time = retry_after + RATE_LIMIT_RETRY_BUFFER
+                logger.warning(f"[RATE LIMIT] ติดลิมิตครั้งที่ {attempt+1}/3, รอ {wait_time:.1f} วิ...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"[HTTP ERROR] เปลี่ยนชื่อห้องไม่ได้: {e}")
+                return
+        except Exception:
+            logger.error(f"[SYSTEM ERROR] เกิดข้อผิดพลาด:\n{traceback.format_exc()}")
+            return
 
 
 async def _debounced_status_update(channel):
@@ -236,9 +137,11 @@ async def _debounced_status_update(channel):
         await asyncio.sleep(DEBOUNCE_SECONDS)
         await _apply_channel_status(channel)
     except asyncio.CancelledError:
-        pass
+        pass 
     finally:
-        _pending_status_tasks.pop(channel.id, None)
+        current_task = asyncio.current_task()
+        if _pending_status_tasks.get(channel.id) is current_task:
+            _pending_status_tasks.pop(channel.id, None)
 
 
 def schedule_channel_status_update(channel):
@@ -255,87 +158,101 @@ def schedule_channel_status_update(channel):
 async def channel_status_reconciler():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        for guild in bot.guilds:
-            for channel_id in CHANNEL_NAMES.keys():
-                pending = _pending_status_tasks.get(channel_id)
-                if pending and not pending.done():
-                    continue
+        try:
+            for guild in bot.guilds:
+                for channel_id in CHANNEL_NAMES.keys():
+                    pending = _pending_status_tasks.get(channel_id)
+                    if pending and not pending.done():
+                        continue
 
-                channel = guild.get_channel(channel_id)
-                if channel:
-                    await _apply_channel_status(channel)
-                await asyncio.sleep(1)
-
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        await _apply_channel_status(channel)
+                    await asyncio.sleep(1)
+        except Exception:
+            logger.error(f"[RECONCILER ERROR] ระบบซิงค์สีทำงานผิดพลาด:\n{traceback.format_exc()}")
+            
         await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
 
 
-def handle_switch_count(member_id, current_channel_id):
-    current_time = time.time()
-    user_data = user_switch_history[member_id]
+# ----------------------------------------------------
+# 5. ฟังก์ชันคำนวณการวาร์ปเข้าห้องลับ
+# ----------------------------------------------------
+def handle_switch_count(guild_id, member_id, current_channel_id):
+    key = (guild_id, member_id)
+    current_time = time.monotonic()
 
-    timed_out = (current_time - user_data["last_time"]) > SWITCH_TIMEOUT
-    previous_channel_id = user_data["last_channel"] if not timed_out else None
+    if key not in user_switch_history:
+        user_switch_history[key] = {"last_channel": None, "count": 0, "last_time": 0.0}
+    
+    user_data = user_switch_history[key]
+
+    if (current_time - user_data["last_time"]) > SWITCH_TIMEOUT:
+        user_data["count"] = 0
+        user_data["last_channel"] = None
+
+    previous_channel_id = user_data["last_channel"]
 
     if current_channel_id in VALID_CHANNELS:
         if previous_channel_id in VALID_CHANNELS and current_channel_id != previous_channel_id:
             user_data["count"] += 1
-        else:
+        elif user_data["count"] == 0:
             user_data["count"] = 1
-        print(f"  └─> อยู่ในห้อง valid สะสม {user_data['count']}/{SWITCH_THRESHOLD} ครั้ง", flush=True)
+            
+        logger.info(f"[TRACKING] User: {member_id} | สลับห้องเป้าหมายสะสม: {user_data['count']}/{SWITCH_THRESHOLD}")
     else:
-        user_data["count"] = 0
+        user_data["count"] = 0 
 
     user_data["last_channel"] = current_channel_id
     user_data["last_time"] = current_time
 
     if user_data["count"] >= SWITCH_THRESHOLD:
-        user_data["count"] = 0
+        user_switch_history.pop(key, None)
         return True
     return False
 
 
+# ----------------------------------------------------
+# 6. Core Events ของ Discord
+# ----------------------------------------------------
 _reconciler_started = False
-_haunt_started = False
-
 
 @bot.event
 async def on_ready():
-    global _reconciler_started, _haunt_started
-    print(f'=== บอท {bot.user.name} ออนไลน์เรียบร้อยแล้ว! ===', flush=True)
+    global _reconciler_started
+    logger.info(f'=== [STARTUP] บอท {bot.user.name} ออนไลน์ (Core Systems Only) ===')
+    
     for guild in bot.guilds:
+        # A) ซิงค์สถานะสีห้อง
         for channel_id in CHANNEL_NAMES.keys():
             channel = guild.get_channel(channel_id)
             if channel:
                 await _apply_channel_status(channel)
 
+        # B) ล้างสิทธิ์ค้างห้องลับช่วง Startup
+        await reconcile_secret_channel_permissions(guild)
+
     if not _reconciler_started:
         _reconciler_started = True
         asyncio.create_task(channel_status_reconciler())
-
-    if HAUNT_SOUND_ENABLED and not _haunt_started:
-        _haunt_started = True
-        for guild in bot.guilds:
-            asyncio.create_task(backroom_haunt_loop(guild))
 
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     try:
-        # 1) ดึงสิทธิ์ห้องลับคืนเมื่อสมาชิกออกจากห้องลับ
-        if before.channel and before.channel.id == SECRET_CHANNEL_ID and (
-            after.channel is None or after.channel.id != SECRET_CHANNEL_ID
-        ):
+        # A) คืนสิทธิ์เมื่อสมาชิกออกจากห้องลับ
+        if before.channel and before.channel.id == SECRET_CHANNEL_ID and (after.channel is None or after.channel.id != SECRET_CHANNEL_ID):
             secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
             if secret_channel:
-                try:
-                    await secret_channel.set_permissions(member, overwrite=None)
-                    print(f"[PERMISSION] ดึงสิทธิ์ห้องลับคืนจาก {member.name} แล้ว", flush=True)
-                except discord.errors.Forbidden:
-                    print(f"[ERROR] บอทไม่มีสิทธิ์จัดการ permission ห้องลับ", flush=True)
+                await _safe_remove_permission(secret_channel, member)
 
-        # 2) ตรวจสอบการสลับห้องเพื่อวาร์ปเข้าห้องลับ
+        # B) เคลียร์ประวัติทันทีเมื่อผู้ใช้ออกจาก Voice Channel
+        if after.channel is None:
+            user_switch_history.pop((member.guild.id, member.id), None)
+
+        # C) คำนวณเพื่อวาร์ปเข้าห้องลับ
         if before.channel != after.channel and after.channel is not None:
-            should_warp = handle_switch_count(member.id, after.channel.id)
+            should_warp = handle_switch_count(member.guild.id, member.id, after.channel.id)
 
             if should_warp:
                 secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
@@ -343,11 +260,21 @@ async def on_voice_state_update(member, before, after):
                     try:
                         await secret_channel.set_permissions(member, connect=True, view_channel=True)
                         await member.move_to(secret_channel)
-                        print(f"[SUCCESS] วาร์ป {member.name} ไปยังห้องลับสำเร็จ!", flush=True)
+                        logger.info(f"[WARP-IN] !!! ดึงตัว {member.name} เข้าห้องลับสำเร็จ !!!")
+                    # 1. Catch Forbidden ก่อนเสมอ (Subclass of HTTPException)
                     except discord.errors.Forbidden:
-                        print(f"[ERROR] บอทไม่มีสิทธิ์ move_members หรือจัดการ permission ห้องลับ", flush=True)
+                        logger.error(f"[PERMISSION DENIED] ไม่มีสิทธิ์วาร์ป หรือจัดการห้องลับสำหรับ {member.name}")
+                        await _safe_remove_permission(secret_channel, member)
+                    # 2. Catch HTTPException
+                    except discord.errors.HTTPException as e:
+                        logger.error(f"[MOVE FAILED] ย้ายตัวไม่สำเร็จ อาจเพราะออกห้องไปก่อน: {e}")
+                        await _safe_remove_permission(secret_channel, member)
+                    # 3. Catch-all เป็นตาข่ายรองรับ Exception ชนิดอื่นๆ ทั้งหมด
+                    except Exception as e:
+                        logger.error(f"[UNEXPECTED WARP ERROR] เกิดข้อผิดพลาดไม่คาดคิดในการวาร์ป:\n{traceback.format_exc()}")
+                        await _safe_remove_permission(secret_channel, member)
 
-        # 3) อัปเดตสถานะห้อง 🔴 / 🟢
+        # D) ตั้งเวลาอัปเดตสี 🔴 / 🟢
         if before.channel != after.channel:
             if before.channel:
                 schedule_channel_status_update(before.channel)
@@ -355,9 +282,15 @@ async def on_voice_state_update(member, before, after):
                 schedule_channel_status_update(after.channel)
 
     except Exception:
-        print(f"\n❌ เกิด ERROR ในการทำงาน:", flush=True)
-        print(traceback.format_exc(), flush=True)
+        logger.error(f"[EVENT ERROR] เกิดปัญหาใน on_voice_state_update:\n{traceback.format_exc()}")
 
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+# ----------------------------------------------------
+# 7. ตรวจสอบ Token ก่อนเริ่มทำงาน
+# ----------------------------------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    logger.critical("[FATAL] ไม่พบ BOT_TOKEN ใน Environment Variables หรือยังไม่ได้ตั้งค่า")
+    sys.exit(1)
+
 bot.run(BOT_TOKEN)
