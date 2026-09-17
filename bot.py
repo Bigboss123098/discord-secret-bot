@@ -50,8 +50,8 @@ RECONCILE_INTERVAL_SECONDS = 90  # ทุกกี่วิ ให้ไล่�
 # ----------------------------------------------------
 WELCOME_SOUND_ENABLED = True
 WELCOME_SOUND_PATHS = ["sounds/sound1.MP3", "sounds/sound2.MP3"]  # แก้ path ให้ตรงกับไฟล์จริง
-WELCOME_SOUND_CHANCE = 1 / 3       # โอกาสที่จะเล่นเสียงต้อนรับตอนมีคนวาร์ปเข้ามา
-WELCOME_SOUND_COOLDOWN = 10 * 60   # cooldown วิ หลังเล่นแล้ว ก่อนจะเล่นให้คนถัดไปได้อีก
+WELCOME_SOUND_CHANCE = 1.0       # โอกาสที่จะเล่นเสียงต้อนรับตอนมีคนวาร์ปเข้ามา
+WELCOME_SOUND_COOLDOWN = 0   # cooldown วิ หลังเล่นแล้ว ก่อนจะเล่นให้คนถัดไปได้อีก
 
 # ----------------------------------------------------
 # ตั้งค่าระบบ "บอทหลอน" สุ่มเข้า Backroom เอง
