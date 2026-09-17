@@ -41,7 +41,7 @@ VALID_CHANNELS = {TARGET_CHANNEL_1_ID, TARGET_CHANNEL_2_ID}
 SWITCH_THRESHOLD = 5      # ต้องสลับกี่ครั้งถึงจะวาร์ป
 SWITCH_TIMEOUT = 10       # ถ้าห่างกันเกินกี่วิ ให้เริ่มนับใหม่
 
-DEBOUNCE_SECONDS = 4      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
+DEBOUNCE_SECONDS = 20      # หน่วงกี่วิก่อนเปลี่ยนชื่อห้อง (รอสถานะนิ่งก่อนค่อยเช็คจริง)
 RATE_LIMIT_RETRY_BUFFER = 2   # ติดลิมิตแล้วรอเพิ่มกี่วิจาก retry_after ที่ Discord บอก
 RECONCILE_INTERVAL_SECONDS = 90  # ทุกกี่วิ ให้ไล่เช็คสถานะทุกห้องแบบเงียบๆ (ตาข่ายนิรภัย)
 
