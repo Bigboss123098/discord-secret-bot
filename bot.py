@@ -136,10 +136,7 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
 
             print(f"[VOICE] ต่อ voice สำเร็จ กำลังเริ่มเล่น {label}: {sound_path}", flush=True)
 
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(sound_path),
-                volume=SOUND_VOLUME,
-            )
+            source = discord.FFmpegPCMAudio(sound_path, **ffmpeg_options)
 
             finished = asyncio.Event()
 
