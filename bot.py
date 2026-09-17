@@ -56,11 +56,17 @@ WELCOME_SOUND_COOLDOWN = 10 * 60   # cooldown วิ หลังเล่นแ
 # ----------------------------------------------------
 # ตั้งค่าระบบ "บอทหลอน" สุ่มเข้า Backroom เอง
 # ----------------------------------------------------
+# หมายเหตุ: Render แผน Free จะ sleep/restart service เป็นระยะ (พบว่า restart
+# ทุก ~12 นาทีจริง) ทำให้ asyncio.sleep() แบบรอยาวๆ (เช่นรอ 10-50 นาทีทีเดียว)
+# ไม่มีวันครบรอบ เพราะตัวแปรในหน่วยความจำหายไปพร้อม process ทุกครั้งที่ตาย
+# แก้โดยเปลี่ยนวิธีคิด: "เช็คถี่ๆ ด้วยรอบสั้น" + "สุ่มโอกาสต่ำในแต่ละรอบ"
+# แทนที่จะ "รอยาวแล้วเข้าทีเดียว" — ทำให้ทนต่อการ restart ได้ เพราะแต่ละรอบ
+# เช็คสั้นพอที่จะครบก่อนบอทตายไปเสียก่อน
 HAUNT_SOUND_ENABLED = True
 HAUNT_SOUND_PATHS = ["sounds/1.mp3", "sounds/2.mp3", "sounds/3.mp3", "sounds/4.mp3", "sounds/5.mp3"]
-HAUNT_MIN_INTERVAL = 10 * 60   # สุ่มรอสั้นสุดกี่วิ ก่อนจะลองเข้ารอบถัดไป
-HAUNT_MAX_INTERVAL = 50 * 60   # สุ่มรอนานสุดกี่วิ
-HAUNT_COOLDOWN = 30 * 60       # หลังเข้าไปเล่นสำเร็จแล้ว ต้องรออย่างน้อยกี่วิถึงจะลองรอบใหม่
+HAUNT_CHECK_INTERVAL = 5 * 60   # เช็ครอบใหม่ทุกกี่วิ (แค่เช็ค ไม่ได้แปลว่าเข้า)
+HAUNT_CHANCE_PER_CHECK = 0.07   # โอกาสที่จะเข้าไปเล่นจริงในแต่ละรอบเช็ค (7%)
+HAUNT_COOLDOWN = 30 * 60        # หลังเข้าไปเล่นสำเร็จแล้ว ต้องรออย่างน้อยกี่วิถึงจะเริ่มเช็ครอบใหม่
 
 # ระดับเสียงโดยรวม (ใช้ร่วมกันทั้งสองระบบ) — ปรับให้เบาลงได้ตามต้องการ
 # หมายเหตุ: เสียง "ติ้ง" ตอนบอทเข้า/ออกห้องเสียงเป็นเสียงแจ้งเตือนของ Discord
@@ -106,6 +112,7 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
             print(f"[ERROR] ไม่พบไฟล์เสียง: {sound_path}")
             return False
 
+        print(f"[VOICE] เริ่มเล่น{label}: {sound_path} ในห้อง {channel.id}")
         voice_client = None
         try:
             existing = guild.voice_client
@@ -114,6 +121,7 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
                 voice_client = existing
             else:
                 voice_client = await channel.connect(timeout=15, reconnect=False)
+            print(f"[VOICE] ต่อ voice เข้าห้อง {channel.id} สำเร็จ กำลังเล่น{label}")
 
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(sound_path),
@@ -132,6 +140,7 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
 
             try:
                 await asyncio.wait_for(finished.wait(), timeout=60)
+                print(f"[VOICE] เล่น{label}จบแล้ว กำลังออกจากห้อง")
             except asyncio.TimeoutError:
                 print(f"[WARN] {label}เล่นนานเกินคาด บังคับหยุด")
                 voice_client.stop()
@@ -166,28 +175,36 @@ async def play_backroom_welcome_sound(member, secret_channel):
     guild_id = secret_channel.guild.id
     now = time.time()
 
-    if now - _welcome_sound_last_played[guild_id] < WELCOME_SOUND_COOLDOWN:
-        print(f"[VOICE] ข้ามเสียงต้อนรับให้ {member.name} เพราะยังติด cooldown อยู่")
+    remaining_cooldown = WELCOME_SOUND_COOLDOWN - (now - _welcome_sound_last_played[guild_id])
+    if remaining_cooldown > 0:
+        print(f"[VOICE] ข้ามเสียงต้อนรับให้ {member.name} เพราะยังติด cooldown อีก {remaining_cooldown:.0f} วิ")
         return
 
-    if random.random() > WELCOME_SOUND_CHANCE:
-        return  # สุ่มไม่โดน รอบนี้ไม่เล่น
+    roll = random.random()
+    if roll > WELCOME_SOUND_CHANCE:
+        print(f"[VOICE] สุ่มไม่โดนสำหรับ {member.name} (roll={roll:.2f}, ต้อง <= {WELCOME_SOUND_CHANCE:.2f}) ไม่เล่นเสียงรอบนี้")
+        return
 
+    print(f"[VOICE] สุ่มโดนสำหรับ {member.name} (roll={roll:.2f}) กำลังเข้าไปเล่นเสียงต้อนรับ...")
     sound_path = random.choice(WELCOME_SOUND_PATHS)
     success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงต้อนรับ")
     if success:
         _welcome_sound_last_played[guild_id] = time.time()
+        print(f"[VOICE] เล่นเสียงต้อนรับให้ {member.name} เสร็จแล้ว")
+    else:
+        print(f"[VOICE] เล่นเสียงต้อนรับให้ {member.name} ไม่สำเร็จ (ดู error ด้านบน)")
 
 
 async def backroom_haunt_loop(guild):
-    """ระบบบอทหลอน: วนสุ่มเวลารอ 10-50 นาที แล้วลองเข้า Backroom เอง
-    เข้าได้ก็ต่อเมื่อมีคน (ไม่ใช่บอท) อยู่ในห้องนั้นจริงๆ ถ้าห้องว่างข้ามรอบไปเลย
-    เข้าสำเร็จแล้วมี cooldown 30 นาทีก่อนจะลองรอบใหม่ได้"""
+    """ระบบบอทหลอน: เช็คถี่ๆ ทุก HAUNT_CHECK_INTERVAL วิ แต่ละรอบสุ่มโอกาสต่ำๆ
+    (HAUNT_CHANCE_PER_CHECK) ว่าจะเข้าไปเล่นจริงไหม เข้าได้ก็ต่อเมื่อมีคน (ไม่ใช่บอท)
+    อยู่ในห้องนั้นจริงๆ ถ้าห้องว่างข้ามรอบไปเลยโดยไม่นับเป็นการสุ่มเสียโอกาส
+    เข้าสำเร็จแล้วมี cooldown ก่อนจะเริ่มเช็ครอบใหม่ได้
+    ออกแบบให้ทนต่อการที่ Render Free tier restart บ่อยๆ เพราะรอบเช็คสั้น
+    (ไม่ต้องพึ่งการ asyncio.sleep() รอยาวๆ ที่จะหายไปพร้อม process ถ้าตายกลางทาง)"""
     await bot.wait_until_ready()
     while not bot.is_closed():
-        wait_time = random.uniform(HAUNT_MIN_INTERVAL, HAUNT_MAX_INTERVAL)
-        print(f"[HAUNT] รอบถัดไปในอีก {wait_time / 60:.1f} นาที")
-        await asyncio.sleep(wait_time)
+        await asyncio.sleep(HAUNT_CHECK_INTERVAL)
 
         try:
             secret_channel = guild.get_channel(SECRET_CHANNEL_ID)
@@ -196,8 +213,10 @@ async def backroom_haunt_loop(guild):
 
             human_members = [m for m in secret_channel.members if not m.bot]
             if not human_members:
-                print("[HAUNT] ห้อง Backroom ว่าง ข้ามรอบนี้")
-                continue
+                continue  # ห้องว่าง ข้ามรอบนี้เงียบๆ ไม่นับเป็นการสุ่มเสียโอกาส
+
+            if random.random() > HAUNT_CHANCE_PER_CHECK:
+                continue  # สุ่มไม่โดนรอบนี้ รอเช็ครอบถัดไป
 
             sound_path = random.choice(HAUNT_SOUND_PATHS)
             success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงหลอน")
