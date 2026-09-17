@@ -104,24 +104,37 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
     lock = _voice_lock[guild.id]
 
     if lock.locked():
-        print(f"[VOICE] ข้าม{label} เพราะบอทกำลังเล่นเสียงอื่นอยู่ในกิลด์นี้")
+        print(f"[VOICE] ข้าม{label} เพราะบอทกำลังเล่นเสียงอื่นอยู่ในกิลด์นี้", flush=True)
         return False
 
     async with lock:
         if not os.path.isfile(sound_path):
-            print(f"[ERROR] ไม่พบไฟล์เสียง: {sound_path}")
+            print(f"[ERROR] ไม่พบไฟล์เสียง: {sound_path}", flush=True)
             return False
 
-        print(f"[VOICE] เริ่มเล่น{label}: {sound_path} ในห้อง {channel.id}")
         voice_client = None
         try:
-            existing = guild.voice_client
-            if existing:
-                await existing.move_to(channel)
-                voice_client = existing
-            else:
-                voice_client = await channel.connect(timeout=15, reconnect=False)
-            print(f"[VOICE] ต่อ voice เข้าห้อง {channel.id} สำเร็จ กำลังเล่น{label}")
+            # 1. หน่วงเวลา 1.5 วินาที รอให้ Discord จัดการ Permission/State การย้ายห้องให้เสร็จก่อน
+            await asyncio.sleep(1.5)
+
+            # 2. ถ้ามี Voice Client ค้างอยู่ ให้ตัดสายเดิมออกอย่างปลอดภัยก่อน
+            if guild.voice_client:
+                try:
+                    await guild.voice_client.disconnect(force=True)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+            # 3. เชื่อมต่อเข้าห้องเสียงใหม่ (เปิด reconnect=True เพื่อให้พยายามต่อใหม่ถ้าโดนตัด)
+            print(f"[VOICE] กำลังเชื่อมต่อเข้าห้อง {channel.name} ({channel.id})...", flush=True)
+            voice_client = await channel.connect(timeout=15, reconnect=True)
+            await asyncio.sleep(0.5)  # รอให้ Handshake นิ่งแป๊บหนึ่ง
+
+            if not voice_client.is_connected():
+                print(f"[ERROR] การเชื่อมต่อ voice หลุดก่อนจะได้เล่นเสียง", flush=True)
+                return False
+
+            print(f"[VOICE] ต่อ voice สำเร็จ กำลังเริ่มเล่น {label}: {sound_path}", flush=True)
 
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(sound_path),
@@ -132,39 +145,42 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
 
             def _on_done(error):
                 if error:
-                    print(f"[ERROR] เล่น{label}ไม่สำเร็จ: {error}")
-                # ตั้ง event จาก event loop หลัก เพราะ callback นี้ถูกเรียกจาก thread อื่น
+                    print(f"[ERROR] เล่น{label}ไม่สำเร็จ: {error}", flush=True)
                 bot.loop.call_soon_threadsafe(finished.set)
 
             voice_client.play(source, after=_on_done)
 
+            # 4. วน Loop รอจนกว่าเสียงจะเล่นจบ และคอยเช็กว่าบอทไม่โดนเตะออกจากห้อง
             try:
                 await asyncio.wait_for(finished.wait(), timeout=60)
-                print(f"[VOICE] เล่น{label}จบแล้ว กำลังออกจากห้อง")
+                if voice_client.is_connected():
+                    print(f"[VOICE] เล่น{label}จบแล้ว กำลังออกจากห้อง", flush=True)
+                else:
+                    print(f"[WARN] เสียงเล่นจบแล้ว แต่บอทหลุดจากห้องระหว่างเล่น", flush=True)
             except asyncio.TimeoutError:
-                print(f"[WARN] {label}เล่นนานเกินคาด บังคับหยุด")
-                voice_client.stop()
+                print(f"[WARN] {label}เล่นนานเกินคาด บังคับหยุด", flush=True)
+                if voice_client.is_playing():
+                    voice_client.stop()
 
             return True
 
         except discord.errors.ClientException as e:
-            print(f"[ERROR] ต่อ voice ไม่สำเร็จ (อาจต่ออยู่แล้วหรือสิทธิ์ไม่พอ): {e}")
+            print(f"[ERROR] ต่อ voice ไม่สำเร็จ (อาจต่ออยู่แล้วหรือสิทธิ์ไม่พอ): {e}", flush=True)
             return False
         except asyncio.TimeoutError:
-            print(f"[ERROR] ต่อ voice ห้อง {channel.id} timeout")
+            print(f"[ERROR] ต่อ voice ห้อง {channel.id} timeout", flush=True)
             return False
         except Exception:
-            print(f"\n❌ เกิด ERROR ใน play_sound_in_channel ({label}):")
-            print(traceback.format_exc())
+            print(f"\n❌ เกิด ERROR ใน play_sound_in_channel ({label}):", flush=True)
+            print(traceback.format_exc(), flush=True)
             return False
         finally:
-            # ออกจากห้องเสมอไม่ว่าจะเกิดอะไรขึ้น กันบอทค้างอยู่ใน voice
+            # 5. ออกจากห้องเสมอไม่ว่าจะเกิดอะไรขึ้น
             if voice_client and voice_client.is_connected():
                 try:
                     await voice_client.disconnect(force=True)
                 except Exception:
                     pass
-
 
 async def play_backroom_welcome_sound(member, secret_channel):
     if not WELCOME_SOUND_ENABLED:
