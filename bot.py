@@ -53,7 +53,7 @@ SWITCH_THRESHOLD = 5
 SWITCH_TIMEOUT = 10       
 
 # กฎอัปเดตสีสถานะห้อง
-DEBOUNCE_SECONDS = 15             
+DEBOUNCE_SECONDS = 20             
 RATE_LIMIT_RETRY_BUFFER = 2       
 RECONCILE_INTERVAL_SECONDS = 90   
 
