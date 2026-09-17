@@ -167,9 +167,8 @@ async def play_sound_in_channel(channel, sound_path, label="เสียง"):
 
 
 async def play_backroom_welcome_sound(member, secret_channel):
-    """ระบบเสียงต้อนรับ: สุ่ม 1/3 ว่าจะเล่นไหม มี cooldown แยกของตัวเอง
-    ไม่เกี่ยวข้องกับระบบบอทหลอน (คนละชุดไฟล์ คนละ cooldown)"""
     if not WELCOME_SOUND_ENABLED:
+        print(f"[VOICE] ระบบเสียงต้อนรับปิดอยู่", flush=True)
         return
 
     guild_id = secret_channel.guild.id
@@ -177,22 +176,23 @@ async def play_backroom_welcome_sound(member, secret_channel):
 
     remaining_cooldown = WELCOME_SOUND_COOLDOWN - (now - _welcome_sound_last_played[guild_id])
     if remaining_cooldown > 0:
-        print(f"[VOICE] ข้ามเสียงต้อนรับให้ {member.name} เพราะยังติด cooldown อีก {remaining_cooldown:.0f} วิ")
+        print(f"[VOICE] ติด Cooldown อีก {remaining_cooldown:.0f} วินาที (ไม่เล่นเสียง)", flush=True)
         return
 
     roll = random.random()
     if roll > WELCOME_SOUND_CHANCE:
-        print(f"[VOICE] สุ่มไม่โดนสำหรับ {member.name} (roll={roll:.2f}, ต้อง <= {WELCOME_SOUND_CHANCE:.2f}) ไม่เล่นเสียงรอบนี้")
+        print(f"[VOICE] สุ่มไม่โดน (roll={roll:.2f} > {WELCOME_SOUND_CHANCE:.2f})", flush=True)
         return
 
-    print(f"[VOICE] สุ่มโดนสำหรับ {member.name} (roll={roll:.2f}) กำลังเข้าไปเล่นเสียงต้อนรับ...")
+    print(f"[VOICE] สุ่มโดน! กำลังส่งบอทเข้าห้อง {secret_channel.name}...", flush=True)
     sound_path = random.choice(WELCOME_SOUND_PATHS)
+    
     success = await play_sound_in_channel(secret_channel, sound_path, label="เสียงต้อนรับ")
     if success:
         _welcome_sound_last_played[guild_id] = time.time()
-        print(f"[VOICE] เล่นเสียงต้อนรับให้ {member.name} เสร็จแล้ว")
+        print(f"[VOICE] เล่นเสียงให้ {member.name} สำเร็จ!", flush=True)
     else:
-        print(f"[VOICE] เล่นเสียงต้อนรับให้ {member.name} ไม่สำเร็จ (ดู error ด้านบน)")
+        print(f"[VOICE] เล่นเสียงไม่สำเร็จ (เช็ก Error ด้านบน)", flush=True)
 
 
 async def backroom_haunt_loop(guild):
