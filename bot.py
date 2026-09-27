@@ -131,6 +131,9 @@ async def _apply_channel_status(channel):
             logger.error(f"[SYSTEM ERROR] เกิดข้อผิดพลาด:\n{traceback.format_exc()}")
             return
 
+    # ครบจำนวนรอบ retry แล้วยังไม่สำเร็จ — log ให้เห็นชัดว่ายอมแพ้แล้ว แทนที่จะเงียบไปเฉยๆ
+    logger.error(f"[GIVE UP] ลองเปลี่ยนชื่อห้อง {channel.id} ครบ 3 ครั้งแล้วยังไม่สำเร็จ รอรอบ reconciler ถัดไป")
+
 
 async def _debounced_status_update(channel):
     try:
@@ -169,6 +172,11 @@ async def channel_status_reconciler():
                     if channel:
                         await _apply_channel_status(channel)
                     await asyncio.sleep(1)
+
+                # เช็ค permission ค้างในห้องลับไปพร้อมกันทุกรอบ ไม่ใช่แค่ตอน
+                # startup — กันเคสที่ _safe_remove_permission fail ระหว่างทาง
+                # (เช่นตอน move_to ล้มเหลว) แล้วไม่มีใครมาล้างให้จนกว่าจะ restart
+                await reconcile_secret_channel_permissions(guild)
         except Exception:
             logger.error(f"[RECONCILER ERROR] ระบบซิงค์สีทำงานผิดพลาด:\n{traceback.format_exc()}")
             
@@ -270,7 +278,7 @@ async def on_voice_state_update(member, before, after):
                         logger.error(f"[MOVE FAILED] ย้ายตัวไม่สำเร็จ อาจเพราะออกห้องไปก่อน: {e}")
                         await _safe_remove_permission(secret_channel, member)
                     # 3. Catch-all เป็นตาข่ายรองรับ Exception ชนิดอื่นๆ ทั้งหมด
-                    except Exception as e:
+                    except Exception:
                         logger.error(f"[UNEXPECTED WARP ERROR] เกิดข้อผิดพลาดไม่คาดคิดในการวาร์ป:\n{traceback.format_exc()}")
                         await _safe_remove_permission(secret_channel, member)
 
@@ -293,4 +301,44 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     logger.critical("[FATAL] ไม่พบ BOT_TOKEN ใน Environment Variables หรือยังไม่ได้ตั้งค่า")
     sys.exit(1)
 
-bot.run(BOT_TOKEN)
+# ----------------------------------------------------
+# 8. เริ่มบอทแบบมี Backoff กัน Crash-Loop
+# ----------------------------------------------------
+# ถ้า login พัง (เช่นโดน Global Rate Limit จาก Discord) จะรอนานขึ้นเรื่อยๆ
+# ก่อนลองใหม่ แทนที่จะปล่อยให้ Render restart ทันทีรัวๆ ซึ่งจะยิ่งต่ออายุ
+# การถูกบล็อกให้นานขึ้นไปอีก (ยิ่ง login ถี่ตอนติด rate limit ยิ่งโดนบล็อกนาน)
+MAX_LOGIN_RETRIES = 5
+BASE_BACKOFF_SECONDS = 30  # เริ่มรอ 30 วิ แล้วเพิ่มเป็น 2 เท่าทุกครั้งที่พัง
+
+def run_bot_with_backoff():
+    attempt = 0
+    while attempt < MAX_LOGIN_RETRIES:
+        try:
+            bot.run(BOT_TOKEN)
+            # ถ้า bot.run() จบเองแบบไม่ error (เช่นถูกสั่งปิดปกติ) ให้ออกจาก loop เลย
+            return
+        except discord.errors.HTTPException as e:
+            attempt += 1
+            if e.status == 429:
+                wait_time = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.critical(
+                    f"[LOGIN RATE LIMITED] ครั้งที่ {attempt}/{MAX_LOGIN_RETRIES} "
+                    f"โดน Discord บล็อกชั่วคราว จะรอ {wait_time} วิ ก่อนลองใหม่..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.critical(f"[LOGIN HTTP ERROR] เกิดข้อผิดพลาดตอน login: {e}")
+                raise
+        except Exception:
+            logger.critical(f"[LOGIN FATAL ERROR]\n{traceback.format_exc()}")
+            raise
+
+    logger.critical(
+        f"[LOGIN FAILED] ลอง login ครบ {MAX_LOGIN_RETRIES} ครั้งแล้วยังไม่สำเร็จ "
+        f"หยุดพยายามแล้ว (กันไม่ให้ Discord บล็อกนานขึ้นไปอีก) "
+        f"รอสักพักแล้วค่อย deploy ใหม่ด้วยมือ"
+    )
+    sys.exit(1)
+
+
+run_bot_with_backoff()
