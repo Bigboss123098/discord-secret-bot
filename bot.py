@@ -310,13 +310,79 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
 MAX_LOGIN_RETRIES = 5
 BASE_BACKOFF_SECONDS = 30  # เริ่มรอ 30 วิ แล้วเพิ่มเป็น 2 เท่าทุกครั้งที่พัง
 
+def create_bot():
+    intents = discord.Intents.default()
+    intents.voice_states = True
+    intents.guilds = True
+    intents.members = True
+    return commands.Bot(command_prefix="!", intents=intents)
+
 def run_bot_with_backoff():
+    global bot
     attempt = 0
     while attempt < MAX_LOGIN_RETRIES:
         try:
+            bot = create_bot()
+            
+            # สั่งลงทะเบียน Events เข้ากับ Bot ตัวใหม่
+            @bot.event
+            async def on_ready():
+                global _reconciler_started
+                logger.info(f'=== [STARTUP] บอท {bot.user.name} ออนไลน์ (Core Systems Only) ===')
+                for guild in bot.guilds:
+                    for channel_id in CHANNEL_NAMES.keys():
+                        channel = guild.get_channel(channel_id)
+                        if channel:
+                            await _apply_channel_status(channel)
+                    await reconcile_secret_channel_permissions(guild)
+
+                if not _reconciler_started:
+                    _reconciler_started = True
+                    asyncio.create_task(channel_status_reconciler())
+
+            @bot.event
+            async def on_voice_state_update(member, before, after):
+                # โค้ดใน event on_voice_state_update เดิมทั้งหมด
+                try:
+                    if before.channel and before.channel.id == SECRET_CHANNEL_ID and (after.channel is None or after.channel.id != SECRET_CHANNEL_ID):
+                        secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
+                        if secret_channel:
+                            await _safe_remove_permission(secret_channel, member)
+
+                    if after.channel is None:
+                        user_switch_history.pop((member.guild.id, member.id), None)
+
+                    if before.channel != after.channel and after.channel is not None:
+                        should_warp = handle_switch_count(member.guild.id, member.id, after.channel.id)
+                        if should_warp:
+                            secret_channel = member.guild.get_channel(SECRET_CHANNEL_ID)
+                            if secret_channel:
+                                try:
+                                    await secret_channel.set_permissions(member, connect=True, view_channel=True)
+                                    await member.move_to(secret_channel)
+                                    logger.info(f"[WARP-IN] !!! ดึงตัว {member.name} เข้าห้องลับสำเร็จ !!!")
+                                except discord.errors.Forbidden:
+                                    logger.error(f"[PERMISSION DENIED] ไม่มีสิทธิ์วาร์ป สำหรับ {member.name}")
+                                    await _safe_remove_permission(secret_channel, member)
+                                except discord.errors.HTTPException as e:
+                                    logger.error(f"[MOVE FAILED] ย้ายตัวไม่สำเร็จ: {e}")
+                                    await _safe_remove_permission(secret_channel, member)
+                                except Exception:
+                                    logger.error(f"[UNEXPECTED WARP ERROR] เกิดข้อผิดพลาดในการวาร์ป:\n{traceback.format_exc()}")
+                                    await _safe_remove_permission(secret_channel, member)
+
+                    if before.channel != after.channel:
+                        if before.channel:
+                            schedule_channel_status_update(before.channel)
+                        if after.channel:
+                            schedule_channel_status_update(after.channel)
+
+                except Exception:
+                    logger.error(f"[EVENT ERROR] เกิดปัญหาใน on_voice_state_update:\n{traceback.format_exc()}")
+
             bot.run(BOT_TOKEN)
-            # ถ้า bot.run() จบเองแบบไม่ error (เช่นถูกสั่งปิดปกติ) ให้ออกจาก loop เลย
             return
+
         except discord.errors.HTTPException as e:
             attempt += 1
             if e.status == 429:
@@ -329,14 +395,13 @@ def run_bot_with_backoff():
             else:
                 logger.critical(f"[LOGIN HTTP ERROR] เกิดข้อผิดพลาดตอน login: {e}")
                 raise
-        except Exception:
+        except Exception as e:
             logger.critical(f"[LOGIN FATAL ERROR]\n{traceback.format_exc()}")
             raise
 
     logger.critical(
         f"[LOGIN FAILED] ลอง login ครบ {MAX_LOGIN_RETRIES} ครั้งแล้วยังไม่สำเร็จ "
-        f"หยุดพยายามแล้ว (กันไม่ให้ Discord บล็อกนานขึ้นไปอีก) "
-        f"รอสักพักแล้วค่อย deploy ใหม่ด้วยมือ"
+        f"หยุดพยายามแล้ว รอสักพักแล้วค่อยลองใหม่"
     )
     sys.exit(1)
 
